@@ -37,13 +37,14 @@ import subprocess
 import sys
 import tempfile
 import time
+import multiprocessing
 
 # so you can do "from fabricate import *" to simplify your build script
 __all__ = ['setup', 'run', 'autoclean', 'main', 'shell', 'fabricate_version',
            'memoize', 'outofdate', 
            'ExecutionError', 'md5_hasher', 'mtime_hasher',
            'Runner', 'AtimesRunner', 'StraceRunner', 'AlwaysRunner',
-           'SmartRunner', 'Builder']
+           'SmartRunner', 'Builder', 'Parallel_Builder', 'Parallel_Group' ]
 
 import textwrap
 
@@ -955,9 +956,130 @@ class Builder(object):
                 return True
         return False
 
+class Parallel_Builder( Builder ) :
+	"""WARNING EXPERIMENTAL - Builder that can run jobs in parallel
+	   
+	   To use call setup with builder=Parallel_Builder and a keyword argument 
+	   jobs=n to allow maximum of n jobs in parallel. All other parameters
+	   are as per the standard Builder. Only parallelises with StraceRunner. """
+	   
+	def __init__(self, **kwargs) :
+		""" Initialise the number of jobs and pass the rest of the arguments to
+		    the normal Builder. Setting jobs = zero or one will not run any 
+		    parallel jobs. """
+		if 'jobs' in kwargs :
+			jobs = kwargs[ 'jobs' ]
+			del kwargs[ 'jobs' ]
+		else :
+			jobs = 0
+		if jobs > 1 :
+			self.pool = multiprocessing.Pool( jobs )
+		else :
+			self.pool = None
+		Builder.__init__( self, **kwargs )
+	
+	class result( object ) :
+		""" wrapper around multiprocessing.Async_Result to hold result if not run"""
+		
+		def __init__(self, return_value = None, async = None, command = None ) :
+			self.return_value = return_value
+			self.async = async
+			self.command = command
+			
+		def get(self) :
+			if self.async is None : return self.return_value
+			d, o = self.async.get()
+			return self.command, d, o
+			
+		def ready(self) :
+			if self.async is None : return True
+			return self.async.ready()
+
+		def successful(self) :
+			if self.async is None : return True
+			return self.async.successful()
+				
+				
+	def prun(self, *args, **kwargs):
+		""" Run command given in args with kwargs per shell(), but only if its
+			dependencies or outputs have changed or don't exist. Don't wait
+			for completion. """
+		arglist = args_to_list(args)
+		if not arglist:
+			raise TypeError('prun() takes at least 1 argument (0 given)')
+		# we want a command line string for the .deps file key and for display
+		command = subprocess.list2cmdline(arglist)
+		if not self.cmdline_outofdate(command):
+			return self.result( ( command, None, None ) )
+
+		# if just checking up-to-date-ness, set flag and do nothing more
+		self.outofdate_flag = True
+		if self.checking:
+			return self.result( (command, None, None) )
+
+		# use runner to run command and collect dependencies
+		self.echo_command(command)
+		# if no pool or not StraceRunner, call synchronously
+		if self.pool is None or not isinstance( self.runner, StraceRunner ) :
+			deps, outputs = self.runner(*arglist, **kwargs)
+			return self.result( ( command, deps, outputs ) )
+		arglist.insert( 0, self.runner )
+		return self.result( async = self.pool.apply_async( self.runner.__call__, arglist, kwargs) )
+        
+	def pdone(self, command, deps, outputs ) :
+		"""Process the results after they become available"""
+		if deps is not None or outputs is not None:
+			deps_dict = {}
+			# hash the dependency inputs and outputs
+			for dep in deps:
+				hashed = self.hasher(dep)
+				if hashed is not None:
+					deps_dict[dep] = "input-" + hashed
+			for output in outputs:
+				hashed = self.hasher(output)
+				if hashed is not None:
+					deps_dict[output] = "output-" + hashed
+			self.deps[command] = deps_dict
+		return command, deps, outputs
+
 # default Builder instance, used by helper run() and main() helper functions
+# and parallel group objects
 default_builder = Builder()
 default_command = 'build'
+
+class Parallel_Group(object):
+	""" Collect a group of commands to run in parallel & wait for and 
+		process the results.
+		Can be used as a context manager object and done will be called 
+		automagically, otherwise call done after providing all the commands
+		with run.  Note if jobs are available the processes will start when
+		run is called. """
+	
+	def __init__(self) :
+		self.results = []
+		self.returns = []
+		
+	def run(self, *args, **kwargs) :
+		self.results.append( default_builder.prun( *args, **kwargs ) )
+		
+	def done(self):
+		""" Wait for and collect the results, if a command raised an 
+		    exception it will be re-raised here. Can be called again after 
+		    exception handled. """
+		while len( self.results ) > 0 :
+			for result in self.results :
+				if result.ready() :
+					self.results.remove(result)
+					c, d, o = result.get()
+					returns.append( default_builder.pdone(c, d, o) )
+		time.sleep(0.01)
+	
+	def __enter__(self) : return self
+	
+	def __exit__(self, et, ev, tr) :
+		if et is None: # no exception
+			self.done()
+		return False
 
 def setup(builder=None, default=None, **kwargs):
     """ Setup the default Builder (or an instance of given builder if "builder"
