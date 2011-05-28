@@ -37,7 +37,7 @@ from fabricate import *
 def build() :
 	with Parallel_Group() as p :
 		for i in range(10) :
-			p.run( 'sleepy_script', i )
+			p.run( './sleepy_script', i )
 
 setup( Parallel_Builder, jobs = 5, runner = StraceRunner )
 main()

@@ -443,6 +443,60 @@ class StraceProcess(object):
         return '<StraceProcess cwd=%s deps=%s outputs=%s>' % \
                (self.cwd, self.deps, self.outputs)
 
+# Moved out of stracerunner to make it picklable
+# Regular expressions for parsing of strace log
+_open_re       = re.compile(r'(?P<pid>\d+)\s+open\("(?P<name>[^"]*)", (?P<mode>[^,)]*)')
+_stat32_re     = re.compile(r'(?P<pid>\d+)\s+stat\("(?P<name>[^"]*)", .*')
+_stat64_re     = re.compile(r'(?P<pid>\d+)\s+stat64\("(?P<name>[^"]*)", .*')
+_execve_re     = re.compile(r'(?P<pid>\d+)\s+execve\("(?P<name>[^"]*)", .*')
+_mkdir_re      = re.compile(r'(?P<pid>\d+)\s+mkdir\("(?P<name>[^"]*)", .*')
+_rename_re     = re.compile(r'(?P<pid>\d+)\s+rename\("[^"]*", "(?P<name>[^"]*)"\)')
+_kill_re       = re.compile(r'(?P<pid>\d+)\s+killed by.*')
+_chdir_re      = re.compile(r'(?P<pid>\d+)\s+chdir\("(?P<cwd>[^"]*)"\)')
+_exit_group_re = re.compile(r'(?P<pid>\d+)\s+exit_group\((?P<status>.*)\).*')
+_clone_re      = re.compile(r'(?P<pid_clone>\d+)\s+(clone|fork|vfork)\(.*\)\s*=\s*(?P<pid>\d*)')
+
+# Regular expressions for detecting interrupted lines in strace log
+# 3618  clone( <unfinished ...>
+# 3618  <... clone resumed> child_stack=0, flags=CLONE, child_tidptr=0x7f83deffa780) = 3622
+_unfinished_start_re = re.compile(r'(?P<pid>\d+)(?P<body>.*)<unfinished ...>$')
+_unfinished_end_re   = re.compile(r'(?P<pid>\d+)\s+\<\.\.\..*\>(?P<body>.*)')
+
+def _call_strace(self, *args, **kwargs):
+    """ Run command and return its dependencies and outputs, using strace
+        to determine dependencies (by looking at what files are opened or
+        modified). """
+    ignore_status = kwargs.pop('ignore_status', False)
+    if self.keep_temps:
+        outname = 'strace%03d.txt' % self.temp_count
+        self.temp_count += 1
+        handle = os.open(outname, os.O_CREAT)
+    else:
+        handle, outname = tempfile.mkstemp()
+
+    try:
+        try:
+            outfile = os.fdopen(handle, 'r')
+        except:
+            os.close(handle)
+            raise
+        try:
+            status, deps, outputs = self._do_strace(args, kwargs, outfile, outname)
+            if status is None:
+                raise ExecutionError(
+                    '%r was killed unexpectedly' % args[0], '', -1)
+        finally:
+            outfile.close()
+    finally:
+        if not self.keep_temps:
+            os.remove(outname)
+
+    if status and not ignore_status:
+        raise ExecutionError('%r exited with status %d'
+                             % (os.path.basename(args[0]), status),
+                             '', status)
+    return list(deps), list(outputs)
+
 class StraceRunner(Runner):
     keep_temps = False
 
@@ -451,10 +505,10 @@ class StraceRunner(Runner):
         if self.strace_version == 0:
             raise RunnerUnsupportedException('strace is not available')
         if self.strace_version == 32:
-            self._stat_re = self._stat32_re
+            self._stat_re = _stat32_re
             self._stat_func = 'stat'
         else:
-            self._stat_re = self._stat64_re
+            self._stat_re = _stat64_re
             self._stat_func = 'stat64'
         self._builder = builder
         self.temp_count = 0
@@ -478,23 +532,6 @@ class StraceRunner(Runner):
         except OSError:
             return 0
 
-    # Regular expressions for parsing of strace log
-    _open_re       = re.compile(r'(?P<pid>\d+)\s+open\("(?P<name>[^"]*)", (?P<mode>[^,)]*)')
-    _stat32_re     = re.compile(r'(?P<pid>\d+)\s+stat\("(?P<name>[^"]*)", .*')
-    _stat64_re     = re.compile(r'(?P<pid>\d+)\s+stat64\("(?P<name>[^"]*)", .*')
-    _execve_re     = re.compile(r'(?P<pid>\d+)\s+execve\("(?P<name>[^"]*)", .*')
-    _mkdir_re      = re.compile(r'(?P<pid>\d+)\s+mkdir\("(?P<name>[^"]*)", .*')
-    _rename_re     = re.compile(r'(?P<pid>\d+)\s+rename\("[^"]*", "(?P<name>[^"]*)"\)')
-    _kill_re       = re.compile(r'(?P<pid>\d+)\s+killed by.*')
-    _chdir_re      = re.compile(r'(?P<pid>\d+)\s+chdir\("(?P<cwd>[^"]*)"\)')
-    _exit_group_re = re.compile(r'(?P<pid>\d+)\s+exit_group\((?P<status>.*)\).*')
-    _clone_re      = re.compile(r'(?P<pid_clone>\d+)\s+(clone|fork|vfork)\(.*\)\s*=\s*(?P<pid>\d*)')
-
-    # Regular expressions for detecting interrupted lines in strace log
-    # 3618  clone( <unfinished ...>
-    # 3618  <... clone resumed> child_stack=0, flags=CLONE, child_tidptr=0x7f83deffa780) = 3622
-    _unfinished_start_re = re.compile(r'(?P<pid>\d+)(?P<body>.*)<unfinished ...>$')
-    _unfinished_end_re   = re.compile(r'(?P<pid>\d+)\s+\<\.\.\..*\>(?P<body>.*)')
 
     def _do_strace(self, args, kwargs, outfile, outname):
         """ Run strace on given command args/kwargs, sending output to file.
@@ -510,8 +547,8 @@ class StraceRunner(Runner):
         unfinished = {}  # list of interrupted entries in strace log
         for line in outfile:
             # look for split lines
-            unfinished_start_match = self._unfinished_start_re.match(line)
-            unfinished_end_match = self._unfinished_end_re.match(line)
+            unfinished_start_match = _unfinished_start_re.match(line)
+            unfinished_end_match = _unfinished_end_re.match(line)
             if unfinished_start_match:
                 pid = unfinished_start_match.group('pid')
                 body = unfinished_start_match.group('body')
@@ -524,14 +561,14 @@ class StraceRunner(Runner):
                 del unfinished[pid]
 
             is_output = False
-            open_match = self._open_re.match(line)
+            open_match = _open_re.match(line)
             stat_match = self._stat_re.match(line)
-            execve_match = self._execve_re.match(line)
-            mkdir_match = self._mkdir_re.match(line)
-            rename_match = self._rename_re.match(line)
-            clone_match = self._clone_re.match(line)  
+            execve_match = _execve_re.match(line)
+            mkdir_match = _mkdir_re.match(line)
+            rename_match = _rename_re.match(line)
+            clone_match = _clone_re.match(line)  
 
-            kill_match = self._kill_re.match(line)
+            kill_match = _kill_re.match(line)
             if kill_match:
                 return None, None, None
 
@@ -585,11 +622,11 @@ class StraceRunner(Runner):
                     else:
                         processes[pid].add_dep(name)
 
-            match = self._chdir_re.match(line)
+            match = _chdir_re.match(line)
             if match:
                 processes[pid].cwd = os.path.join(processes[pid].cwd, match.group('cwd'))
 
-            match = self._exit_group_re.match(line)
+            match = _exit_group_re.match(line)
             if match:
                 status = int(match.group('status'))
 
@@ -606,36 +643,7 @@ class StraceRunner(Runner):
         """ Run command and return its dependencies and outputs, using strace
             to determine dependencies (by looking at what files are opened or
             modified). """
-        ignore_status = kwargs.pop('ignore_status', False)
-        if self.keep_temps:
-            outname = 'strace%03d.txt' % self.temp_count
-            self.temp_count += 1
-            handle = os.open(outname, os.O_CREAT)
-        else:
-            handle, outname = tempfile.mkstemp()
-
-        try:
-            try:
-                outfile = os.fdopen(handle, 'r')
-            except:
-                os.close(handle)
-                raise
-            try:
-                status, deps, outputs = self._do_strace(args, kwargs, outfile, outname)
-                if status is None:
-                    raise ExecutionError(
-                        '%r was killed unexpectedly' % args[0], '', -1)
-            finally:
-                outfile.close()
-        finally:
-            if not self.keep_temps:
-                os.remove(outname)
-
-        if status and not ignore_status:
-            raise ExecutionError('%r exited with status %d'
-                                 % (os.path.basename(args[0]), status),
-                                 '', status)
-        return list(deps), list(outputs)
+        return _call_strace( self, *args, **kwargs )
 
 class AlwaysRunner(Runner):
     def __init__(self, builder):
@@ -956,91 +964,91 @@ class Builder(object):
                 return True
         return False
 
+# pool can't be in builder as it isn't picklable
+_pool = None
+
 class Parallel_Builder( Builder ) :
-	"""WARNING EXPERIMENTAL - Builder that can run jobs in parallel
-	   
-	   To use call setup with builder=Parallel_Builder and a keyword argument 
-	   jobs=n to allow maximum of n jobs in parallel. All other parameters
-	   are as per the standard Builder. Only parallelises with StraceRunner. """
-	   
-	def __init__(self, **kwargs) :
-		""" Initialise the number of jobs and pass the rest of the arguments to
-		    the normal Builder. Setting jobs = zero or one will not run any 
-		    parallel jobs. """
-		if 'jobs' in kwargs :
-			jobs = kwargs[ 'jobs' ]
-			del kwargs[ 'jobs' ]
-		else :
-			jobs = 0
-		if jobs > 1 :
-			self.pool = multiprocessing.Pool( jobs )
-		else :
-			self.pool = None
-		Builder.__init__( self, **kwargs )
-	
-	class result( object ) :
-		""" wrapper around multiprocessing.Async_Result to hold result if not run"""
-		
-		def __init__(self, return_value = None, async = None, command = None ) :
-			self.return_value = return_value
-			self.async = async
-			self.command = command
-			
-		def get(self) :
-			if self.async is None : return self.return_value
-			d, o = self.async.get()
-			return self.command, d, o
-			
-		def ready(self) :
-			if self.async is None : return True
-			return self.async.ready()
-
-		def successful(self) :
-			if self.async is None : return True
-			return self.async.successful()
-				
-				
-	def prun(self, *args, **kwargs):
-		""" Run command given in args with kwargs per shell(), but only if its
-			dependencies or outputs have changed or don't exist. Don't wait
-			for completion. """
-		arglist = args_to_list(args)
-		if not arglist:
-			raise TypeError('prun() takes at least 1 argument (0 given)')
-		# we want a command line string for the .deps file key and for display
-		command = subprocess.list2cmdline(arglist)
-		if not self.cmdline_outofdate(command):
-			return self.result( ( command, None, None ) )
-
-		# if just checking up-to-date-ness, set flag and do nothing more
-		self.outofdate_flag = True
-		if self.checking:
-			return self.result( (command, None, None) )
-
-		# use runner to run command and collect dependencies
-		self.echo_command(command)
-		# if no pool or not StraceRunner, call synchronously
-		if self.pool is None or not isinstance( self.runner, StraceRunner ) :
-			deps, outputs = self.runner(*arglist, **kwargs)
-			return self.result( ( command, deps, outputs ) )
-		arglist.insert( 0, self.runner )
-		return self.result( async = self.pool.apply_async( self.runner.__call__, arglist, kwargs) )
+    """Builder that can run jobs in parallel
+       
+       To use call setup with builder=Parallel_Builder and a keyword argument 
+       jobs=n to allow maximum of n jobs in parallel. All other parameters
+       are as per the standard Builder. Only parallelises with StraceRunner. """
+       
+    def __init__(self, **kwargs) :
+        """ Initialise the number of jobs and pass the rest of the arguments to
+            the normal Builder. Setting jobs = zero or one will not run any 
+            parallel jobs. """
+        global _pool
+        jobs = kwargs.pop( 'jobs', 0 )
+        if jobs > 1 :
+            _pool = multiprocessing.Pool( jobs )
+        else :
+            _pool = None
+        Builder.__init__( self, **kwargs )
+    
+    class result( object ) :
+        """ wrapper around multiprocessing.Async_Result to hold result if not run"""
         
-	def pdone(self, command, deps, outputs ) :
-		"""Process the results after they become available"""
-		if deps is not None or outputs is not None:
-			deps_dict = {}
-			# hash the dependency inputs and outputs
-			for dep in deps:
-				hashed = self.hasher(dep)
-				if hashed is not None:
-					deps_dict[dep] = "input-" + hashed
-			for output in outputs:
-				hashed = self.hasher(output)
-				if hashed is not None:
-					deps_dict[output] = "output-" + hashed
-			self.deps[command] = deps_dict
-		return command, deps, outputs
+        def __init__(self, return_value = None, async = None, command = None ) :
+            self.return_value = return_value
+            self.async = async
+            self.command = command
+            
+        def get(self) :
+            if self.async is None : return self.return_value
+            d, o = self.async.get()
+            return self.command, d, o
+            
+        def ready(self) :
+            if self.async is None : return True
+            return self.async.ready()
+
+        def successful(self) :
+            if self.async is None : return True
+            return self.async.successful()
+                
+                
+    def prun(self, *args, **kwargs):
+        """ Run command given in args with kwargs per shell(), but only if its
+            dependencies or outputs have changed or don't exist. Don't wait
+            for completion. """
+        arglist = args_to_list(args)
+        if not arglist:
+            raise TypeError('prun() takes at least 1 argument (0 given)')
+        # we want a command line string for the .deps file key and for display
+        command = subprocess.list2cmdline(arglist)
+        if not self.cmdline_outofdate(command):
+            return self.result( ( command, None, None ) )
+
+        # if just checking up-to-date-ness, set flag and do nothing more
+        self.outofdate_flag = True
+        if self.checking:
+            return self.result( (command, None, None) )
+
+        # use runner to run command and collect dependencies
+        self.echo_command(command)
+        # if no pool or not StraceRunner, call synchronously
+        if _pool is None or not isinstance( self.runner, StraceRunner ) :
+            deps, outputs = self.runner(*arglist, **kwargs)
+            return self.result( ( command, deps, outputs ) )
+        arglist.insert( 0, self.runner )
+        return self.result( command = command, async = _pool.apply_async( _call_strace, arglist, kwargs) )
+        
+    def pdone(self, command, deps, outputs ) :
+        """Process the results after they become available"""
+        if deps is not None or outputs is not None:
+            deps_dict = {}
+            # hash the dependency inputs and outputs
+            for dep in deps:
+                hashed = self.hasher(dep)
+                if hashed is not None:
+                    deps_dict[dep] = "input-" + hashed
+            for output in outputs:
+                hashed = self.hasher(output)
+                if hashed is not None:
+                    deps_dict[output] = "output-" + hashed
+            self.deps[command] = deps_dict
+        return command, deps, outputs
 
 # default Builder instance, used by helper run() and main() helper functions
 # and parallel group objects
@@ -1048,38 +1056,38 @@ default_builder = Builder()
 default_command = 'build'
 
 class Parallel_Group(object):
-	""" Collect a group of commands to run in parallel & wait for and 
-		process the results.
-		Can be used as a context manager object and done will be called 
-		automagically, otherwise call done after providing all the commands
-		with run.  Note if jobs are available the processes will start when
-		run is called. """
-	
-	def __init__(self) :
-		self.results = []
-		self.returns = []
-		
-	def run(self, *args, **kwargs) :
-		self.results.append( default_builder.prun( *args, **kwargs ) )
-		
-	def done(self):
-		""" Wait for and collect the results, if a command raised an 
-		    exception it will be re-raised here. Can be called again after 
-		    exception handled. """
-		while len( self.results ) > 0 :
-			for result in self.results :
-				if result.ready() :
-					self.results.remove(result)
-					c, d, o = result.get()
-					returns.append( default_builder.pdone(c, d, o) )
-		time.sleep(0.01)
-	
-	def __enter__(self) : return self
-	
-	def __exit__(self, et, ev, tr) :
-		if et is None: # no exception
-			self.done()
-		return False
+    """ Collect a group of commands to run in parallel & wait for and 
+        process the results.
+        Can be used as a context manager object and done will be called 
+        automagically, otherwise call done after providing all the commands
+        with run.  Note if jobs are available the processes will start when
+        run is called. """
+    
+    def __init__(self) :
+        self.results = []
+        self.returns = []
+        
+    def run(self, *args, **kwargs) :
+        self.results.append( default_builder.prun( *args, **kwargs ) )
+        
+    def done(self):
+        """ Wait for and collect the results, if a command raised an 
+            exception it will be re-raised here. Can be called again after 
+            exception handled. """
+        while len( self.results ) > 0 :
+            for result in self.results[:] :
+                if result.ready() :
+                    self.results.remove(result)
+                    c, d, o = result.get()
+                    self.returns.append( default_builder.pdone(c, d, o) )
+        time.sleep(0.01)
+    
+    def __enter__(self) : return self
+    
+    def __exit__(self, et, ev, tr) :
+        if et is None: # no exception
+            self.done()
+        return False
 
 def setup(builder=None, default=None, **kwargs):
     """ Setup the default Builder (or an instance of given builder if "builder"
