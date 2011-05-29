@@ -505,10 +505,10 @@ class StraceRunner(Runner):
         if self.strace_version == 0:
             raise RunnerUnsupportedException('strace is not available')
         if self.strace_version == 32:
-            self._stat_re = _stat32_re
+            self._stat_re = self._stat32_re
             self._stat_func = 'stat'
         else:
-            self._stat_re = _stat64_re
+            self._stat_re = self._stat64_re
             self._stat_func = 'stat64'
         self._builder = builder
         self.temp_count = 0
@@ -532,6 +532,23 @@ class StraceRunner(Runner):
         except OSError:
             return 0
 
+    # Regular expressions for parsing of strace log
+    _open_re       = re.compile(r'(?P<pid>\d+)\s+open\("(?P<name>[^"]*)", (?P<mode>[^,)]*)')
+    _stat32_re     = re.compile(r'(?P<pid>\d+)\s+stat\("(?P<name>[^"]*)", .*')
+    _stat64_re     = re.compile(r'(?P<pid>\d+)\s+stat64\("(?P<name>[^"]*)", .*')
+    _execve_re     = re.compile(r'(?P<pid>\d+)\s+execve\("(?P<name>[^"]*)", .*')
+    _mkdir_re      = re.compile(r'(?P<pid>\d+)\s+mkdir\("(?P<name>[^"]*)", .*')
+    _rename_re     = re.compile(r'(?P<pid>\d+)\s+rename\("[^"]*", "(?P<name>[^"]*)"\)')
+    _kill_re       = re.compile(r'(?P<pid>\d+)\s+killed by.*')
+    _chdir_re      = re.compile(r'(?P<pid>\d+)\s+chdir\("(?P<cwd>[^"]*)"\)')
+    _exit_group_re = re.compile(r'(?P<pid>\d+)\s+exit_group\((?P<status>.*)\).*')
+    _clone_re      = re.compile(r'(?P<pid_clone>\d+)\s+(clone|fork|vfork)\(.*\)\s*=\s*(?P<pid>\d*)')
+
+    # Regular expressions for detecting interrupted lines in strace log
+    # 3618  clone( <unfinished ...>
+    # 3618  <... clone resumed> child_stack=0, flags=CLONE, child_tidptr=0x7f83deffa780) = 3622
+    _unfinished_start_re = re.compile(r'(?P<pid>\d+)(?P<body>.*)<unfinished ...>$')
+    _unfinished_end_re   = re.compile(r'(?P<pid>\d+)\s+\<\.\.\..*\>(?P<body>.*)')
 
     def _do_strace(self, args, kwargs, outfile, outname):
         """ Run strace on given command args/kwargs, sending output to file.
@@ -547,8 +564,8 @@ class StraceRunner(Runner):
         unfinished = {}  # list of interrupted entries in strace log
         for line in outfile:
             # look for split lines
-            unfinished_start_match = _unfinished_start_re.match(line)
-            unfinished_end_match = _unfinished_end_re.match(line)
+            unfinished_start_match = self._unfinished_start_re.match(line)
+            unfinished_end_match = self._unfinished_end_re.match(line)
             if unfinished_start_match:
                 pid = unfinished_start_match.group('pid')
                 body = unfinished_start_match.group('body')
@@ -561,14 +578,14 @@ class StraceRunner(Runner):
                 del unfinished[pid]
 
             is_output = False
-            open_match = _open_re.match(line)
+            open_match = self._open_re.match(line)
             stat_match = self._stat_re.match(line)
-            execve_match = _execve_re.match(line)
-            mkdir_match = _mkdir_re.match(line)
-            rename_match = _rename_re.match(line)
-            clone_match = _clone_re.match(line)  
+            execve_match = self._execve_re.match(line)
+            mkdir_match = self._mkdir_re.match(line)
+            rename_match = self._rename_re.match(line)
+            clone_match = self._clone_re.match(line)  
 
-            kill_match = _kill_re.match(line)
+            kill_match = self._kill_re.match(line)
             if kill_match:
                 return None, None, None
 
@@ -622,11 +639,11 @@ class StraceRunner(Runner):
                     else:
                         processes[pid].add_dep(name)
 
-            match = _chdir_re.match(line)
+            match = self._chdir_re.match(line)
             if match:
                 processes[pid].cwd = os.path.join(processes[pid].cwd, match.group('cwd'))
 
-            match = _exit_group_re.match(line)
+            match = self._exit_group_re.match(line)
             if match:
                 status = int(match.group('status'))
 
