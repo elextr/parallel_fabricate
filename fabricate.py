@@ -791,6 +791,10 @@ class Builder(object):
         # use runner to run command and collect dependencies
         self.echo_command(command)
         deps, outputs = self.runner(*arglist, **kwargs)
+        return self.done(command, deps, outputs)
+        
+    def done(self, command, deps, outputs):
+        """ Process the results after they become available """
         if deps is not None or outputs is not None:
             deps_dict = {}
             # hash the dependency inputs and outputs
@@ -1003,7 +1007,6 @@ class Parallel_Builder( Builder ) :
             if self.async is None : return True
             return self.async.successful()
                 
-                
     def prun(self, *args, **kwargs):
         """ Run command given in args with kwargs per shell(), but only if its
             dependencies or outputs have changed or don't exist. Don't wait
@@ -1030,22 +1033,6 @@ class Parallel_Builder( Builder ) :
         arglist.insert( 0, self.runner )
         return self.result( command = command, async = _pool.apply_async( _call_strace, arglist, kwargs) )
         
-    def pdone(self, command, deps, outputs ) :
-        """Process the results after they become available"""
-        if deps is not None or outputs is not None:
-            deps_dict = {}
-            # hash the dependency inputs and outputs
-            for dep in deps:
-                hashed = self.hasher(dep)
-                if hashed is not None:
-                    deps_dict[dep] = "input-" + hashed
-            for output in outputs:
-                hashed = self.hasher(output)
-                if hashed is not None:
-                    deps_dict[output] = "output-" + hashed
-            self.deps[command] = deps_dict
-        return command, deps, outputs
-
 # default Builder instance, used by helper run() and main() helper functions
 # and parallel group objects
 default_builder = Builder()
@@ -1064,18 +1051,22 @@ class Parallel_Group(object):
         self.returns = []
         
     def run(self, *args, **kwargs) :
-        self.results.append( default_builder.prun( *args, **kwargs ) )
+        if isinstance( default_builder, Parallel_Builder ) :
+            self.results.append( default_builder.prun( *args, **kwargs ) )
+        else :
+            default_builder.run( *args, **kwargs )
         
     def done(self):
         """ Wait for and collect the results, if a command raised an 
             exception it will be re-raised here. Can be called again after 
             exception handled. """
+        if not isinstance( default_builder, Parallel_Builder ) : return
         while len( self.results ) > 0 :
             for result in self.results[:] :
                 if result.ready() :
                     self.results.remove(result)
                     c, d, o = result.get()
-                    self.returns.append( default_builder.pdone(c, d, o) )
+                    self.returns.append( default_builder.done(c, d, o) )
         time.sleep(0.01)
     
     def __enter__(self) : return self
