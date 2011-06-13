@@ -1031,6 +1031,7 @@ class Parallel_Builder( Builder ) :
             deps, outputs = self.runner(*arglist, **kwargs)
             return self.result( ( command, deps, outputs ) )
         arglist.insert( 0, self.runner )
+        StraceRunner.keep_temps = False # name counter not shared, can't use with parallel operation
         return self.result( command = command, async = _pool.apply_async( _call_strace, arglist, kwargs) )
         
 # default Builder instance, used by helper run() and main() helper functions
@@ -1124,6 +1125,8 @@ def parse_options(usage, extra_options=None):
                       help="show debug info (why commands are rebuilt)")
     parser.add_option('-k', '--keep', action='store_true',
                       help='keep temporary strace output files')
+    parser.add_option('-j', '--jobs', type='int', default=1,
+                      help='maximum number of parallel jobs')
     if extra_options:
         # add any user-specified options passed in via main()
         for option in extra_options:
@@ -1139,6 +1142,9 @@ def parse_options(usage, extra_options=None):
         default_builder.autoclean()
     if options.keep:
         StraceRunner.keep_temps = options.keep
+    if options.jobs > 1:
+        global _pool
+        _pool = multiprocessing.Pool( options.jobs )
     return parser, options, args
 
 def fabricate_version(min=None, max=None):
