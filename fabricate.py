@@ -443,59 +443,9 @@ class StraceProcess(object):
         return '<StraceProcess cwd=%s deps=%s outputs=%s>' % \
                (self.cwd, self.deps, self.outputs)
 
-# Moved out of stracerunner to make it picklable
-# Regular expressions for parsing of strace log
-_open_re       = re.compile(r'(?P<pid>\d+)\s+open\("(?P<name>[^"]*)", (?P<mode>[^,)]*)')
-_stat32_re     = re.compile(r'(?P<pid>\d+)\s+stat\("(?P<name>[^"]*)", .*')
-_stat64_re     = re.compile(r'(?P<pid>\d+)\s+stat64\("(?P<name>[^"]*)", .*')
-_execve_re     = re.compile(r'(?P<pid>\d+)\s+execve\("(?P<name>[^"]*)", .*')
-_mkdir_re      = re.compile(r'(?P<pid>\d+)\s+mkdir\("(?P<name>[^"]*)", .*')
-_rename_re     = re.compile(r'(?P<pid>\d+)\s+rename\("[^"]*", "(?P<name>[^"]*)"\)')
-_kill_re       = re.compile(r'(?P<pid>\d+)\s+killed by.*')
-_chdir_re      = re.compile(r'(?P<pid>\d+)\s+chdir\("(?P<cwd>[^"]*)"\)')
-_exit_group_re = re.compile(r'(?P<pid>\d+)\s+exit_group\((?P<status>.*)\).*')
-_clone_re      = re.compile(r'(?P<pid_clone>\d+)\s+(clone|fork|vfork)\(.*\)\s*=\s*(?P<pid>\d*)')
-
-# Regular expressions for detecting interrupted lines in strace log
-# 3618  clone( <unfinished ...>
-# 3618  <... clone resumed> child_stack=0, flags=CLONE, child_tidptr=0x7f83deffa780) = 3622
-_unfinished_start_re = re.compile(r'(?P<pid>\d+)(?P<body>.*)<unfinished ...>$')
-_unfinished_end_re   = re.compile(r'(?P<pid>\d+)\s+\<\.\.\..*\>(?P<body>.*)')
-
 def _call_strace(self, *args, **kwargs):
-    """ Run command and return its dependencies and outputs, using strace
-        to determine dependencies (by looking at what files are opened or
-        modified). """
-    ignore_status = kwargs.pop('ignore_status', False)
-    if self.keep_temps:
-        outname = 'strace%03d.txt' % self.temp_count
-        self.temp_count += 1
-        handle = os.open(outname, os.O_CREAT)
-    else:
-        handle, outname = tempfile.mkstemp()
-
-    try:
-        try:
-            outfile = os.fdopen(handle, 'r')
-        except:
-            os.close(handle)
-            raise
-        try:
-            status, deps, outputs = self._do_strace(args, kwargs, outfile, outname)
-            if status is None:
-                raise ExecutionError(
-                    '%r was killed unexpectedly' % args[0], '', -1)
-        finally:
-            outfile.close()
-    finally:
-        if not self.keep_temps:
-            os.remove(outname)
-
-    if status and not ignore_status:
-        raise ExecutionError('%r exited with status %d'
-                             % (os.path.basename(args[0]), status),
-                             '', status)
-    return list(deps), list(outputs)
+    """ Top level function call for Strace that can be run in parallel """
+    return self( *args, **kwargs )
 
 class StraceRunner(Runner):
     keep_temps = False
@@ -660,7 +610,36 @@ class StraceRunner(Runner):
         """ Run command and return its dependencies and outputs, using strace
             to determine dependencies (by looking at what files are opened or
             modified). """
-        return _call_strace( self, *args, **kwargs )
+        ignore_status = kwargs.pop('ignore_status', False)
+        if self.keep_temps:
+            outname = 'strace%03d.txt' % self.temp_count
+            self.temp_count += 1
+            handle = os.open(outname, os.O_CREAT)
+        else:
+            handle, outname = tempfile.mkstemp()
+
+        try:
+            try:
+                outfile = os.fdopen(handle, 'r')
+            except:
+                os.close(handle)
+                raise
+            try:
+                status, deps, outputs = self._do_strace(args, kwargs, outfile, outname)
+                if status is None:
+                    raise ExecutionError(
+                        '%r was killed unexpectedly' % args[0], '', -1)
+            finally:
+                outfile.close()
+        finally:
+            if not self.keep_temps:
+                os.remove(outname)
+
+        if status and not ignore_status:
+            raise ExecutionError('%r exited with status %d'
+                                 % (os.path.basename(args[0]), status),
+                                 '', status)
+        return list(deps), list(outputs)
 
 class AlwaysRunner(Runner):
     def __init__(self, builder):
