@@ -1092,8 +1092,14 @@ setup.__doc__ += '\n\n' + Builder.__init__.__doc__
 
 def run(*args, **kwargs):
     """ Run the given command, but only if its dependencies have changed. Uses
-        the default Builder. Return value as per Builder.run(). """
-    return default_builder.run(*args, **kwargs)
+        the default Builder. Return value as per Builder.run().
+        Use parallel group if a single list argument passed. """
+    if len( args ) == 1 and isinstance( args[0], list ) :
+        with Parallel_Group() as p :
+            for c in args[0] :
+                p.run( *c )
+    else:
+        return default_builder.run(*args, **kwargs)
 
 def autoclean():
     """ Automatically delete all outputs of the default build. """
