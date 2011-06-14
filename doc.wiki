@@ -103,7 +103,7 @@ def compile():
     with ParallelGroup() as p:
         p.run([('gcc', '-c', source+'.c') for source in c_sources])
         p.run([('g77', '-c', source+'.f') for source in fortran_sources])
-        p.run([('gcc', '-c', source+'.c', '`pkg-config gtk+-2.0 --cflags`')
+        p.run([('gcc', '-c', source+'.c', '`pkg-config', 'gtk+-2.0', '--cflags`')
                 for source in gtk_sources], shell=True)
 }}}
 

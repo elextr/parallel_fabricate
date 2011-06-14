@@ -1057,7 +1057,7 @@ class ParallelGroup(object):
     def run(self, *args, **kwargs):
         if len(args) == 1 and isinstance(args[0], list):
             for c in args[0]:
-                self.run(c)
+                self.run(*c, **kwargs)
         if isinstance(default_builder, ParallelBuilder):
             self.results.append(default_builder.prun(*args, **kwargs))
         else :
@@ -1104,7 +1104,7 @@ def run(*args, **kwargs):
     if len( args ) == 1 and isinstance( args[0], list ):
         with ParallelGroup() as p:
             for c in args[0]:
-                p.run(*c)
+                p.run(*c, **kwargs)
     else:
         return default_builder.run(*args, **kwargs)
 
