@@ -1,0 +1,114 @@
+#summary How to have Fabricate run multiple commands in parallel
+
+= Running Commands in Parallel =
+
+Normally fabricate runs the commansds you specify in sequence
+in the order they are specified.  This is simple and easy to 
+understand.
+
+However build performance can be improved by running more than one 
+command at once.  This can take advantage of multiple cores and
+even on a single core processor can improve performance by keeping
+the CPU busy whilst it is waiting for the disk.
+
+There are two parts to telling fabricate to run commands in parallel,
+
+# Telling setup to build in parallel
+# Telling fabricate which commands to run in parallel
+
+== Setup for parallelization ==
+
+Commands can only be run in parallel if the StraceRunner is used, so
+you need to tell setup() to use the ParallelBuilder and explicitly
+to use the StraceRunner.  You use the jobs keyword parameter to specify how many 
+jobs you want to run at once.  Note that setting this too high will 
+reduce performance, about three to five is usually best.
+
+An example setup command is:
+
+{{{
+setup(ParallelBuilder, jobs=5, runner=StraceRunner)
+}}}
+
+The jobs parameter is overridden by the --jobs command line option. 
+The default number of jobs is one if you don't specify anything else.
+
+== Which commands to parallelize ==
+
+Not all commands can be run in parallel, for example compiling a set
+of C source files is normally fine, but the command to link them has to wait until they 
+are all compiled before it can be run.
+
+In line with the principle *explicit is best* you tell fabricate
+which commands to run in parallel.
+
+There are several methods of specifying parallel jobs to support
+varying levels of complexity.
+
+The simple way is just to pass a list to the run() function.  All
+the commands in that list will be run in parallel and run() will
+return when they all finish.  For example, to parallelize the 
+compilations in the script on the home page:
+
+{{{
+from fabricate import *
+
+sources = ['program', 'util']
+
+def build():
+    compile()
+    link()
+
+def compile():
+    run([('gcc', '-c', source+'.c') for source in sources])
+
+def link():
+    objects = [s+'.o' for s in sources]
+    run('gcc', '-o', 'program', objects)
+
+def clean():
+    autoclean()
+
+setup(ParallelBuilder, jobs=4, runner=StraceRunner)
+main()
+}}}
+
+In more complicated situations it may be easier to call run() more than once
+instead of combining everything into one list.  This is also essential if you need to 
+change parameters for any of the commands, eg to run them in a shell.
+
+But there needs to be a way of telling fabricate that several calls to run() should 
+be considered as a group to run in parallel and then to wait for them to finish 
+before moving on to other commands.
+
+The ParallelGroup class provides this functionality.
+
+ParallelGroup objects have a run() method that operates the 
+same as the run() function except it does not wait for the 
+commands to run and all the commands from all calls to the 
+run() method will be considereda group to run in parallel.  
+Also the commands start running with the first call to run so 
+some commands can be running while the script works out more 
+commands.
+
+When used in a Python 'with' statement a ParallelGroup will 
+automatically wait at the end of the statement for all jobs
+to complete.
+
+For example to compile two types of source files and run 
+some commands in the shell to use pkg-config:
+
+{{{
+def compile():
+    with ParallelGroup() as p:
+        p.run([('gcc', '-c', source+'.c') for source in c_sources])
+        p.run([('g77', '-c', source+'.f') for source in fortran_sources])
+        p.run([('gcc', '-c', source+'.c', '`pkg-config gtk+-2.0 --cflags`')
+                for source in gtk_sources], shell=True)
+}}}
+
+If you don't use the ParallelGroup in a 'with' statement you have
+to remember to call the done() method to wait for all the jobs to
+finish and the dependencies to be updated.  But this allows the 
+truly adventurous to use multiple groups to maximise the performance
+of builds.
