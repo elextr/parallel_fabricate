@@ -41,10 +41,10 @@ import multiprocessing
 
 # so you can do "from fabricate import *" to simplify your build script
 __all__ = ['setup', 'run', 'autoclean', 'main', 'shell', 'fabricate_version',
-           'memoize', 'outofdate', 
+           'memoize', 'outofdate',
            'ExecutionError', 'md5_hasher', 'mtime_hasher',
            'Runner', 'AtimesRunner', 'StraceRunner', 'AlwaysRunner',
-           'SmartRunner', 'Builder', 'Parallel_Builder', 'Parallel_Group' ]
+           'SmartRunner', 'Builder', 'ParallelBuilder', 'ParallelGroup']
 
 import textwrap
 
@@ -445,7 +445,7 @@ class StraceProcess(object):
 
 def _call_strace(self, *args, **kwargs):
     """ Top level function call for Strace that can be run in parallel """
-    return self( *args, **kwargs )
+    return self(*args, **kwargs)
 
 class StraceRunner(Runner):
     keep_temps = False
@@ -792,7 +792,7 @@ class Builder(object):
         self.echo_command(command)
         deps, outputs = self.runner(*arglist, **kwargs)
         return self.done(command, deps, outputs)
-        
+
     def done(self, command, deps, outputs):
         """ Process the results after they become available """
         if deps is not None or outputs is not None:
@@ -807,7 +807,7 @@ class Builder(object):
                 if hashed is not None:
                     deps_dict[output] = "output-" + hashed
             self.deps[command] = deps_dict
-        
+
         return command, deps, outputs
 
     def memoize(self, command, **kwargs):
@@ -967,46 +967,49 @@ class Builder(object):
 # pool can't be in builder as it isn't picklable
 _pool = None
 
-class Parallel_Builder( Builder ) :
+class ParallelBuilder(Builder):
     """Builder that can run jobs in parallel
-       
-       To use call setup with builder=Parallel_Builder and a keyword argument 
+
+       To use call setup with builder=ParallelBuilder and a keyword argument
        jobs=n to allow maximum of n jobs in parallel. All other parameters
        are as per the standard Builder. Only parallelises with StraceRunner. """
-       
-    def __init__(self, **kwargs) :
+
+    def __init__(self, **kwargs):
         """ Initialise the number of jobs and pass the rest of the arguments to
-            the normal Builder. Setting jobs = zero or one will not run any 
+            the normal Builder. Setting jobs = zero or one will not run any
             parallel jobs. """
         global _pool
-        jobs = kwargs.pop( 'jobs', 0 )
-        if jobs > 1 :
-            _pool = multiprocessing.Pool( jobs )
-        else :
+        jobs = kwargs.pop('jobs', 0)
+        if jobs > 1:
+            _pool = multiprocessing.Pool(jobs)
+        else:
             _pool = None
-        Builder.__init__( self, **kwargs )
-    
-    class result( object ) :
+        Builder.__init__(self, **kwargs)
+
+    class result(object):
         """ wrapper around multiprocessing.Async_Result to hold result if not run"""
-        
-        def __init__(self, return_value = None, async = None, command = None ) :
+
+        def __init__(self, return_value=None, async=None, command=None):
             self.return_value = return_value
             self.async = async
             self.command = command
-            
-        def get(self) :
-            if self.async is None : return self.return_value
+
+        def get(self):
+            if self.async is None:
+                return self.return_value
             d, o = self.async.get()
             return self.command, d, o
-            
-        def ready(self) :
-            if self.async is None : return True
+
+        def ready(self):
+            if self.async is None:
+                return True
             return self.async.ready()
 
-        def successful(self) :
-            if self.async is None : return True
+        def successful(self):
+            if self.async is None:
+                return True
             return self.async.successful()
-                
+
     def prun(self, *args, **kwargs):
         """ Run command given in args with kwargs per shell(), but only if its
             dependencies or outputs have changed or don't exist. Don't wait
@@ -1017,62 +1020,63 @@ class Parallel_Builder( Builder ) :
         # we want a command line string for the .deps file key and for display
         command = subprocess.list2cmdline(arglist)
         if not self.cmdline_outofdate(command):
-            return self.result( ( command, None, None ) )
+            return self.result((command, None, None))
 
         # if just checking up-to-date-ness, set flag and do nothing more
         self.outofdate_flag = True
         if self.checking:
-            return self.result( (command, None, None) )
+            return self.result((command, None, None))
 
         # use runner to run command and collect dependencies
         self.echo_command(command)
         # if no pool or not StraceRunner, call synchronously
-        if _pool is None or not isinstance( self.runner, StraceRunner ) :
+        if _pool is None or not isinstance(self.runner, StraceRunner):
             deps, outputs = self.runner(*arglist, **kwargs)
-            return self.result( ( command, deps, outputs ) )
-        arglist.insert( 0, self.runner )
+            return self.result((command, deps, outputs))
+        arglist.insert(0, self.runner)
         StraceRunner.keep_temps = False # name counter not shared, can't use with parallel operation
-        return self.result( command = command, async = _pool.apply_async( _call_strace, arglist, kwargs) )
-        
+        return self.result(command=command, async=_pool.apply_async(_call_strace, arglist, kwargs))
+
 # default Builder instance, used by helper run() and main() helper functions
 # and parallel group objects
 default_builder = Builder()
 default_command = 'build'
 
-class Parallel_Group(object):
-    """ Collect a group of commands to run in parallel & wait for and 
+class ParallelGroup(object):
+    """ Collect a group of commands to run in parallel & wait for and
         process the results.
-        Can be used as a context manager object and done will be called 
+        Can be used as a context manager object and done will be called
         automagically, otherwise call done after providing all the commands
         with run.  Note if jobs are available the processes will start when
         run is called. """
-    
-    def __init__(self) :
+
+    def __init__(self):
         self.results = []
         self.returns = []
-        
-    def run(self, *args, **kwargs) :
-        if isinstance( default_builder, Parallel_Builder ) :
-            self.results.append( default_builder.prun( *args, **kwargs ) )
+
+    def run(self, *args, **kwargs):
+        if isinstance(default_builder, ParallelBuilder):
+            self.results.append(default_builder.prun(*args, **kwargs))
         else :
-            default_builder.run( *args, **kwargs )
-        
+            default_builder.run(*args, **kwargs)
+
     def done(self):
-        """ Wait for and collect the results, if a command raised an 
-            exception it will be re-raised here. Can be called again after 
+        """ Wait for and collect the results, if a command raised an
+            exception it will be re-raised here. Can be called again after
             exception handled. """
-        if not isinstance( default_builder, Parallel_Builder ) : return
-        while len( self.results ) > 0 :
-            for result in self.results[:] :
-                if result.ready() :
+        if not isinstance(default_builder, ParallelBuilder):
+            return
+        while len(self.results) > 0:
+            for result in self.results[:]:
+                if result.ready():
                     self.results.remove(result)
                     c, d, o = result.get()
-                    self.returns.append( default_builder.done(c, d, o) )
+                    self.returns.append(default_builder.done(c, d, o))
         time.sleep(0.01)
-    
+
     def __enter__(self) : return self
-    
-    def __exit__(self, et, ev, tr) :
+
+    def __exit__(self, et, ev, tr):
         if et is None: # no exception
             self.done()
         return False
@@ -1094,10 +1098,10 @@ def run(*args, **kwargs):
     """ Run the given command, but only if its dependencies have changed. Uses
         the default Builder. Return value as per Builder.run().
         Use parallel group if a single list argument passed. """
-    if len( args ) == 1 and isinstance( args[0], list ) :
-        with Parallel_Group() as p :
-            for c in args[0] :
-                p.run( *c )
+    if len( args ) == 1 and isinstance( args[0], list ):
+        with ParallelGroup() as p:
+            for c in args[0]:
+                p.run(*c)
     else:
         return default_builder.run(*args, **kwargs)
 
@@ -1150,7 +1154,7 @@ def parse_options(usage, extra_options=None):
         StraceRunner.keep_temps = options.keep
     if options.jobs > 1:
         global _pool
-        _pool = multiprocessing.Pool( options.jobs )
+        _pool = multiprocessing.Pool(options.jobs)
     return parser, options, args
 
 def fabricate_version(min=None, max=None):
