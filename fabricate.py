@@ -37,6 +37,14 @@ import subprocess
 import sys
 import tempfile
 import time
+# multiprocessing module only exists on Python >= 2.6
+try:
+    import multiprocessing
+except ImportError:
+    class MultiprocessingModule(object):
+        def __getattr__(self, name):
+            raise NotImplementedError("multiprocessing module not available, can't do parallel builds")
+    multiprocessing = MultiprocessingModule()
 
 # so you can do "from fabricate import *" to simplify your build script
 __all__ = ['setup', 'run', 'autoclean', 'main', 'shell', 'fabricate_version',
@@ -212,10 +220,10 @@ class Runner(object):
             to shell()"""
         raise NotImplementedError("Runner subclass called but subclass didn't define __call__")
 
-	def is_runner(self):
-		""" Returns the actual runner object """
-		return self
-		
+    def is_runner(self):
+        """ Returns the actual runner object """
+        return self
+        
     def ignore(self, name):
         return self._builder.ignore.search(name)
 
@@ -654,23 +662,27 @@ class AlwaysRunner(Runner):
         return None, None
 
 class SmartRunner(Runner):
-	""" Smart command runner that uses StraceRunner if it can,
-		otherwise AtimesRunner if available, otherwise AlwaysRunner. """
+    """ Smart command runner that uses StraceRunner if it can,
+        otherwise AtimesRunner if available, otherwise AlwaysRunner. """
     def __init__(self, builder):
         self._builder = builder
-		try:
-			self._runner = StraceRunner(self._builder)
-		except RunnerUnsupportedException:
-			try:
-				self._runner = AtimesRunner(self._builder)
-			except RunnerUnsupportedException:
-				self._runner = AlwaysRunner(self._builder)
+        try:
+            self._runner = StraceRunner(self._builder)
+        except RunnerUnsupportedException:
+            try:
+                self._runner = AtimesRunner(self._builder)
+            except RunnerUnsupportedException:
+                self._runner = AlwaysRunner(self._builder)
 
-	def is_runner(self):
-		return self._runner
+    def is_runner(self):
+        return self._runner
 
     def __call__(self, *args, **kwargs):
         return self._runner(*args, **kwargs)
+
+# pool of processes to run parallel jobs, must not be part of any object that
+# is pickled for transfer to these processes, ie it must be global
+_pool = None
 
 class Builder(object):
     """ The Builder.
@@ -691,7 +703,7 @@ class Builder(object):
 
     def __init__(self, runner=None, dirs=None, dirdepth=100, ignoreprefix='.',
                  ignore=None, hasher=md5_hasher, depsname='.deps',
-                 quiet=False, debug=False, inputs_only=False):
+                 quiet=False, debug=False, inputs_only=False, parallel_ok=False):
         """ Initialise a Builder with the given options.
 
         "runner" specifies how programs should be run.  It is either a
@@ -723,6 +735,7 @@ class Builder(object):
         "inputs_only" set to True makes builder only re-build if input hashes
             have changed (ignores output hashes); use with tools that touch
             files that shouldn't cause a rebuild; e.g. g++ collect phase
+        "parallel_ok" set to True to indicate script is safe for parallel running
         """
         if runner is not None:
             self.set_runner(runner)
@@ -732,6 +745,10 @@ class Builder(object):
             pass
         else:
             self.runner = SmartRunner(self)
+        global _pool
+        self.parallel_ok = parallel_ok \
+            and isinstance(self.runner.is_runner(), StraceRunner) \
+            and _pool is not None
         if dirs is None:
             dirs = ['.']
         self.dirs = dirs
@@ -986,16 +1003,19 @@ class Builder(object):
 default_builder = Builder()
 default_command = 'build'
 
-def setup(builder=None, default=None, **kwargs):
+def setup(builder=None, default=None, jobs=1, **kwargs):
     """ Setup the default Builder (or an instance of given builder if "builder"
         is not None) with the same keyword arguments as for Builder().
         "default" is the name of the default function to run when the build
-        script is run with no command line arguments. """
-    global default_builder, default_command
+        script is run with no command line arguments, "jobs" is the number of
+        parallel jobs. """
+    global default_builder, default_command, _pool
     if builder is not None:
         default_builder = builder()
     if default is not None:
         default_command = default
+    if _pool is None and jobs > 1:
+        _pool = multiprocessing.Pool(jobs)
     default_builder.__init__(**kwargs)
 setup.__doc__ += '\n\n' + Builder.__init__.__doc__
 
@@ -1034,6 +1054,8 @@ def parse_options(usage, extra_options=None):
                       help="show debug info (why commands are rebuilt)")
     parser.add_option('-k', '--keep', action='store_true',
                       help='keep temporary strace output files')
+    parser.add_option('-j', '--jobs', type='int', default=1,
+                      help='maximum number of parallel jobs')
     if extra_options:
         # add any user-specified options passed in via main()
         for option in extra_options:
@@ -1049,6 +1071,9 @@ def parse_options(usage, extra_options=None):
         default_builder.autoclean()
     if options.keep:
         StraceRunner.keep_temps = options.keep
+    if options.jobs > 1:
+        global _pool
+        _pool = multiprocessing.Pool(options.jobs)
     return parser, options, args
 
 def fabricate_version(min=None, max=None):
