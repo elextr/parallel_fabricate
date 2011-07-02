@@ -21,7 +21,7 @@ To get help on fabricate functions:
 """
 
 # fabricate version number
-__version__ = '1.17'
+__version__ = '1.18'
 
 # if version of .deps file has changed, we know to not use it
 deps_version = 2
@@ -212,6 +212,10 @@ class Runner(object):
             to shell()"""
         raise NotImplementedError("Runner subclass called but subclass didn't define __call__")
 
+	def is_runner(self):
+		""" Returns the actual runner object """
+		return self
+		
     def ignore(self, name):
         return self._builder.ignore.search(name)
 
@@ -650,24 +654,22 @@ class AlwaysRunner(Runner):
         return None, None
 
 class SmartRunner(Runner):
+	""" Smart command runner that uses StraceRunner if it can,
+		otherwise AtimesRunner if available, otherwise AlwaysRunner. """
     def __init__(self, builder):
         self._builder = builder
-        self._runner = None
+		try:
+			self._runner = StraceRunner(self._builder)
+		except RunnerUnsupportedException:
+			try:
+				self._runner = AtimesRunner(self._builder)
+			except RunnerUnsupportedException:
+				self._runner = AlwaysRunner(self._builder)
+
+	def is_runner(self):
+		return self._runner
 
     def __call__(self, *args, **kwargs):
-        """ Smart command runner that uses StraceRunner if it can,
-            otherwise AtimesRunner if available, otherwise AlwaysRunner.
-            When first called, it caches which runner it used for next time."""
-
-        if self._runner is None:
-            try:
-                self._runner = StraceRunner(self._builder)
-            except RunnerUnsupportedException:
-                try:
-                    self._runner = AtimesRunner(self._builder)
-                except RunnerUnsupportedException:
-                    self._runner = AlwaysRunner(self._builder)
-
         return self._runner(*args, **kwargs)
 
 class Builder(object):
