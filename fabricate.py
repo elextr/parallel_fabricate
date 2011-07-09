@@ -797,19 +797,15 @@ def _results_handler( builder, delay=0.01):
                 if id is False: continue # key of False is _afters not _runnings
                 for r in _groups.item_list(id):
                     if r.results is None and r.async.ready():
-                        if not r.async.successful():
-                            r.results = False
+                       try:
+                            d, o = r.async.get()
+                        except Exception as e:
+                            r.results = e
                             _groups.set_ok(False)
                         else:
-                            try:
-                                d, o = r.async.get()
-                            except Exception as e:
-                                r.results = e
-                                _groups.set_ok(False)
-                            else:
-                                builder.done(r.command, d, o) # save deps
-                                r.results = (r.command, d, o)
-                        _groups.dec_count(id)
+                            builder.done(r.command, d, o) # save deps
+                            r.results = (r.command, d, o)
+                    _groups.dec_count(id)
             # check if can now schedule things waiting on the after queue
             for a in _groups.item_list(False):
                 still_to_do = sum(_groups.get_count(g) for g in a.afters)
