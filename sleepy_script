@@ -1,2 +1,5 @@
 #!/bin/bash
-for (( i = 0; i < 5; i++ )); do echo $1; sleep 1; done
+for (( i = 0; i < 5; i++ )); do echo $1; sleep 0; done
+if [ $1 == 7 ]; then
+exit 1
+fi

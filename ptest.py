@@ -35,10 +35,16 @@
 from fabricate import *
 
 def build() :
-	with Parallel_Group() as p :
-		for i in range(10) :
-			p.run( './sleepy_script', i )
+	for i in range(1,6):
+		run( './sleepy_script', i, group='set1' )
+	for i in range(6,11):
+		run( './sleepy_script', i, group='set2', after='set1' )
+	print after('set1')
+	for i in range(11,16):
+		run( './sleepy_script', i )
+	print after('set2')
+	print after()
 
-setup( Parallel_Builder, jobs = 5, runner = StraceRunner )
+setup(parallel_ok=True, debug=True, jobs=3)
 main()
 		
