@@ -703,18 +703,27 @@ class _after(object):
                 arglist, kwargs) or a threading.Condition to be released """
         self.afters = afters
         self.do = do
-
+        
 class _Groups(object):
     """ Thread safe mapping object whose values are lists of _running
         or _after objects and a count of how many have *not* completed """
+    class value(object):
+        """ the value type in the map """
+        def __init__(self, val=None):
+            self.count = 0  # count of items not yet completed
+            self.items = [] # items in this group
+            if val is not None:
+                self.items.append(val)
+            self.ok = True  # True if no error from any command in group so far
+            
     def __init__(self):
-        self.groups = { False: [0,[]] }
+        self.groups = { False: self.value() }
         self.lock = threading.Lock()
         
     def item_list(self, id):
         """ Return copy of the value list """
         with self.lock:
-            return self.groups[id][1][:]
+            return self.groups[id].items[:]
     
     def remove(self, id):
         """ Remove the group """
@@ -723,29 +732,37 @@ class _Groups(object):
     
     def remove_item(self, id, val):
         with self.lock:
-            self.groups[id][1].remove(val)
+            self.groups[id].items.remove(val)
             
     def add(self, id, val):
         with self.lock:
             if id in self.groups:
-                self.groups[id][1].append(val)
+                self.groups[id].items.append(val)
             else:
-                self.groups[id] = [0, [val]]
-            self.groups[id][0] += 1
+                self.groups[id] = self.value(val)
+            self.groups[id].count += 1
     
     def get_count(self, id):
         with self.lock:
             if id not in self.groups:
                 return 0
-            return self.groups[id][0]
-            
+            return self.groups[id].count
+
     def dec_count(self, id):
         with self.lock:
-            c = self.groups[id][0] - 1
+            c = self.groups[id].count - 1
             if c < 0:
                 raise ValueError
-            self.groups[id][0] = c
+            self.groups[id].count = c
             return c
+    
+    def get_ok(self, id):
+        with self.lock:
+            return self.groups[id].ok
+    
+    def set_ok(self, id, to):
+        with self.lock:
+            self.groups[id].ok = to
             
     def ids(self):
         with self.lock:
@@ -760,12 +777,18 @@ _groups = _Groups()
 _results = None
 _stop_results = threading.Event()
 
-def _results_handler( builder, keep=False, delay=0.01):
+class _todo(object):
+    """ holds the parameters for commands waiting on others """
+    def __init__(self, group, command, arglist, kwargs):
+        self.group = group      # which group it should run as
+        self.command = command  # string command
+        self.arglist = arglist  # command arguments
+        self.kwargs = kwargs    # keywork args for the runner
+        
+def _results_handler( builder, delay=0.01):
     """ Body of thread that stores results in .deps and handles 'after'
         conditions
-        "keep" True to keep results after saving in .deps, ask for them with
-        after(), otherwise only True if succeeded returned
-        "builder" the builder used """
+       "builder" the builder used """
     global _groups, _pools, _stop_results
     try:
         while not _stop_results.isSet():
@@ -776,24 +799,29 @@ def _results_handler( builder, keep=False, delay=0.01):
                     if r.results is None and r.async.ready():
                         if not r.async.successful():
                             r.results = False
+                            _groups.set_ok(False)
                         else:
                             try:
                                 d, o = r.async.get()
                             except Exception as e:
                                 r.results = e
+                                _groups.set_ok(False)
                             else:
                                 builder.done(r.command, d, o) # save deps
-                                r.results = (r.command, d, o) if keep else True
+                                r.results = (r.command, d, o)
                         _groups.dec_count(id)
             # check if can now schedule things waiting on the after queue
             for a in _groups.item_list(False):
                 still_to_do = sum(_groups.get_count(g) for g in a.afters)
+                no_error = all(_groups.get_ok(g) for g in a.afters)
                 if False in a.afters:
                     still_to_do -= 1 # don't count yourself of course
                 if still_to_do == 0:
                     if isinstance(a.do, tuple):
-                        async = _pool.apply_async(_call_strace, a.do[2], a.do[3])
-                        _groups.add(a.do[0], _running(async, a.do[1]))
+                        if no_error:
+                            async = _pool.apply_async(_call_strace, a.do.arglist,
+                                        a.do.kwargs)
+                            _groups.add(a.do.group, _running(async, a.do.command))
                     else:
                         a.do.acquire()
                         a.do.notify()
@@ -830,8 +858,7 @@ class Builder(object):
 
     def __init__(self, runner=None, dirs=None, dirdepth=100, ignoreprefix='.',
                  ignore=None, hasher=md5_hasher, depsname='.deps',
-                 quiet=False, debug=False, inputs_only=False, parallel_ok=False,
-                 keep_output=False):
+                 quiet=False, debug=False, inputs_only=False, parallel_ok=False):
         """ Initialise a Builder with the given options.
 
         "runner" specifies how programs should be run.  It is either a
@@ -864,8 +891,6 @@ class Builder(object):
             have changed (ignores output hashes); use with tools that touch
             files that shouldn't cause a rebuild; e.g. g++ collect phase
         "parallel_ok" set to True to indicate script is safe for parallel running
-        "keep_output" set to true to keep command output of parallel jobs after 
-            dependencies written
         """
         if runner is not None:
             self.set_runner(runner)
@@ -895,7 +920,7 @@ class Builder(object):
         self.parallel_ok = parallel_ok and is_strace and _pool is not None
         if self.parallel_ok:
             _results = threading.Thread(target=_results_handler,
-                args=(self, keep_output))
+                args=[self])
             _results.setDaemon(True)
             _results.start()
             StraceRunner.keep_temps = False # unsafe for parallel execution
@@ -952,7 +977,7 @@ class Builder(object):
                 if not hasattr(after, '__iter__'):
                     after = [after]
                 _groups.add(False,
-                        _after(after, (group, command, arglist, kwargs)))
+                        _after(after, _todo(group, command, arglist, kwargs)))
             else:
                 async = _pool.apply_async(_call_strace, arglist, kwargs)
                 _groups.add(group, _running(async, command))
@@ -1179,7 +1204,11 @@ setup.__doc__ += '\n\n' + Builder.__init__.__doc__
 
 def run(*args, **kwargs):
     """ Run the given command, but only if its dependencies have changed. Uses
-        the default Builder. Return value as per Builder.run(). """
+        the default Builder. Return value as per Builder.run(). 
+        If there is only one positional argument which is an iterable treat each
+        element as a command, returns a list of returns from Builder.run() """
+    if len(args) == 0 and hasattr(args[0], '__iter__'):
+        return [default_builder.run(*a, **kwargs) for a in args[0]]
     return default_builder.run(*args, **kwargs)
 
 def after(*args):
