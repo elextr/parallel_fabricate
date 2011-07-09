@@ -2,7 +2,7 @@
 
 = Running Commands in Parallel =
 
-Normally fabricate runs the commansds you specify in sequence
+Normally fabricate runs the commands you specify in sequence
 in the order they are specified.  This is simple and easy to 
 understand.
 
@@ -13,102 +13,181 @@ the CPU busy whilst it is waiting for the disk.
 
 There are two parts to telling fabricate to run commands in parallel,
 
-# Telling setup to build in parallel
-# Telling fabricate which commands to run in parallel
+# Telling it that it is safe to build in parallel
+# Telling it which commands to run in parallel
 
-== Setup for parallelization ==
+= Summary of changes =
 
-Commands can only be run in parallel if the StraceRunner is used, so
-you need to tell setup() to use the ParallelBuilder and explicitly
-to use the StraceRunner.  You use the jobs keyword parameter to specify how many 
-jobs you want to run at once.  Note that setting this too high will 
-reduce performance, about three to five is usually best.
+The interface between the user script and fabricate changes as follows 
+(compared to the non-parallel version):
 
-An example setup command is:
+== main() ==
 
-{{{
-setup(ParallelBuilder, jobs=5, runner=StraceRunner)
-}}}
+The Builder class constructor and so main() now takes the boolean keyword 
+option 'parallel_ok'.  Set to True this indicates to fabricate that the 
+script has been set up to be safe to run in parallel.
 
-The jobs parameter is overridden by the --jobs command line option. 
-The default number of jobs is one if you don't specify anything else.
+Main() takes the integer keyword option 'jobs' that specifies the default 
+number of parallel jobs to run.  This can be overridden by the -j command 
+line option.  The resultant value must be greater than one to run commands in 
+parallel.
 
-== Which commands to parallelize ==
+Parallel operation is only possible with StraceRunner.
 
-Not all commands can be run in parallel, for example compiling a set
-of C source files is normally fine, but the command to link them has to wait until they 
-are all compiled before it can be run.
+If these three conditions are true then fabricate will run commands in 
+parallel, this will be known as 'parallel mode'.
 
-In line with the principle *explicit is best* you tell fabricate
-which commands to run in parallel.
+== run() ==
 
-There are several methods of specifying parallel jobs to support
-varying levels of complexity.
+run() still accepts any number of string arguments which become the 
+arguments to a single command to be run, but it also now accepts a single 
+iterable argument specifying many commands at once.  Each element is an 
+iterable of strings specifying a command and arguments.
 
-The simple way is just to pass a list to the run() function.  All
-the commands in that list will be run in parallel and run() will
-return when they all finish.  For example, to parallelize the 
-compilations in the script on the home page:
+When not in parallel mode, run() waits for the command or commands to finish 
+and returns the results or a list of results. Results are still a tuple 
+(command, deps, output).
+
+If in parallel mode the commands in the iterable are presumed to be allowed 
+to run in parallel and run() will not wait for their completion. Nor will 
+run() wait for completion of a single command when in parallel mode.
+
+It is often the case that a number of commands can run in  parallel but then 
+the next command has to wait until all the previous ones have finished, eg a 
+link has to wait for all the compiles to finish.
+
+Setting the 'after' keyword parameter to True will prevent the command (or 
+list of commands) from being started until all commands from previous calls 
+to run() have completed.
+
+Sometimes a command only needs to run after for some of the preceding 
+commands have completed, so there needs to be a way of grouping commands 
+together, and then commands can be run after the whole group have all 
+completed. The 'group' keyword parameter identifies the command(s) with a 
+group.  The 'group' parameter can be any hashable type except boolean (True 
+is used as the default for calls to run() without a group parameter and 
+False is used internally), it can be an integer, a string etc and is simply 
+an identifier for the group.
+
+The 'after' parameter can take a group identifier or an iterable of 
+identifiers and the command(s) will not start until all commands identified 
+with these group(s) have completed.  Note that run() does not wait for this 
+to have happened.
+
+In parallel mode run() does not wait for results, so it returns None.
+
+== after() ==
+
+There is a new function after() which takes the same parameters as the 
+'after' parameter to the run() function (defaults to True which will wait for 
+all).  The after() function will stop the whole script until the specified 
+groups have completed and will return their results as a list of tuples, 
+(group id, list of results in order of the calls to run()).  
+
+Results are only returned for commands that actually need to be run because 
+of changes in their dependencies. Groups may be missing if no commands 
+associated with them were run.
+
+Commands scheduled by calls to run() without specifying a group will default 
+to a group id of True.
+
+== Error handling ==
+
+When not running in parallel mode there is no change to the current behavior 
+when a command returns a non-zero status.
+
+When running in parallel mode exceptions are not propogated, instead the 
+exception object is returned instead of the command results tuple.
+
+When an command error has occurred in parallel mode, no command will run 
+which is scheduled 'after' the group identified with the failed command. 
+Other commands will continue to be scheduled and run.
+
+= Examples =
+
+Based on the following non-parallel script:
 
 {{{
 from fabricate import *
 
-sources = ['program', 'util']
+library_sources = ['lib/source1', 'lib/source2']
+main_sources = ['src/main', 'src/other']
 
 def build():
     compile()
     link()
 
 def compile():
-    run([('gcc', '-c', source+'.c') for source in sources])
+    for source in library_sources:
+        run('gcc', '-c', source+'.c')
+    for source in main_sources:
+		run('g++', '-c', source+'.cxx')
 
 def link():
-    objects = [s+'.o' for s in sources]
-    run('gcc', '-o', 'program', objects)
-
-def clean():
-    autoclean()
-
-setup(ParallelBuilder, jobs=4, runner=StraceRunner)
+    objects = [s+'.o' for s in library_sources]
+    run('ar', 'T', 'lib/library.a', objects)
+    objects = [s+'.o' for s in main_sources]
+    run('gcc', '-o', 'program', objects, 'lib/library.a')
+    
 main()
 }}}
 
-In more complicated situations it may be easier to call run() more than once
-instead of combining everything into one list.  This is also essential if you need to 
-change parameters for any of the commands, eg to run them in a shell.
-
-But there needs to be a way of telling fabricate that several calls to run() should 
-be considered as a group to run in parallel and then to wait for them to finish 
-before moving on to other commands.
-
-The ParallelGroup class provides this functionality.
-
-ParallelGroup objects have a run() method that operates the 
-same as the run() function except it does not wait for the 
-commands to run and all the commands from all calls to the 
-run() method will be considereda group to run in parallel.  
-Also the commands start running with the first call to run so 
-some commands can be running while the script works out more 
-commands.
-
-When used in a Python 'with' statement a ParallelGroup will 
-automatically wait at the end of the statement for all jobs
-to complete.
-
-For example to compile two types of source files and run 
-some commands in the shell to use pkg-config:
+The next script does all the compiles in parallel then does the links one after 
+the other after all the compiles are finished (note the use of after() to do 
+this).
 
 {{{
+from fabricate import *
+
+library_sources = ['lib/source1', 'lib/source2']
+main_sources = ['src/main', 'src/other']
+
+def build():
+    compile()
+    link()
+
 def compile():
-    with ParallelGroup() as p:
-        p.run([('gcc', '-c', source+'.c') for source in c_sources])
-        p.run([('g77', '-c', source+'.f') for source in fortran_sources])
-        p.run([('gcc', '-c', source+'.c', '`pkg-config', 'gtk+-2.0', '--cflags`')
-                for source in gtk_sources], shell=True)
+    for source in library_sources:
+        run('gcc', '-c', source+'.c')
+    for source in main_sources:
+		run('g++', '-c', source+'.cxx')
+
+def link():
+    objects = [s+'.o' for s in library_sources]
+    after(); run('ar', 'T', 'lib/library.a', objects)
+    objects = [s+'.o' for s in main_sources]
+    after(); run('gcc', '-o', 'program', objects, 'lib/library.a')
+
+main(parallel=True, jobs=3)
 }}}
 
-If you don't use the ParallelGroup in a 'with' statement you have
-to remember to call the done() method to wait for all the jobs to
-finish and the dependencies to be updated.  But this allows the 
-truly adventurous to use multiple groups to maximise the performance
-of builds.
+The next script makes the links depend only on the specific compiles that 
+are relevant using 'group' and 'after' parameters (note the archive command 
+could be part of the 'main' group so the link will wait on it, but its given 
+its own group for example purposes)
+
+{{{
+from fabricate import *
+
+library_sources = ['lib/source1', 'lib/source2']
+main_sources = ['src/main', 'src/other']
+
+def build():
+    compile()
+    link()
+
+def compile():
+    for source in library_sources:
+        run('gcc', '-c', source+'.c', group='lib')
+    for source in main_sources:
+		run('g++', '-c', source+'.cxx', group='main')
+
+def link():
+    objects = [s+'.o' for s in library_sources]
+    run('ar', 'T', 'lib/library.a', objects, group='arch', after='lib')
+    objects = [s+'.o' for s in main_sources]
+    run('gcc', '-o', 'program', objects, 'lib/library.a', after=('main', 'arch'))
+
+main(parallel=True, jobs=3)
+}}}
+
